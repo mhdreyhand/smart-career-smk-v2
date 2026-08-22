@@ -1,49 +1,153 @@
 import os
+from typing import TypedDict
 import streamlit as st
-from groq import Groq
+from langchain_groq import ChatGroq
+from langgraph.graph import StateGraph, START, END
+
 from mapel import MAPEL_PER_JURUSAN
 from kompetensi import KOMPETENSI_PER_JURUSAN
 
-# 1. KONFIGURASI HALAMAN
+# ==========================================
+# 1. DEFINISI STATE (Shared Memory)
+# ==========================================
+class CareerCoachState(TypedDict):
+    nama_siswa: str
+    jurusan: str
+    pekerjaan_impian: str
+    teks_nilai: str
+    teks_kompetensi: str
+    hasil_agent_1: str
+    hasil_agent_2: str
+    hasil_agent_3: str
+    laporan_final: str
+
+
+# ==========================================
+# 2. DEFINISI NODE / AGENT
+# ==========================================
+MODEL_NAME = "llama-3.3-70b-versatile"
+
+def get_llm():
+    return ChatGroq(
+        model_name=MODEL_NAME,
+        groq_api_key=os.environ.get("GROQ_API_KEY"),
+        temperature=0.2
+    )
+
+def agent_analis_rapor(state: CareerCoachState) -> dict:
+    llm = get_llm()
+    prompt = f"""Anda adalah Guru Produktif Senior SMK untuk Jurusan {state['jurusan']}.
+    Nama Siswa: {state['nama_siswa']}
+    Transkrip Nilai:
+    {state['teks_nilai']}
+    Standar Kompetensi Kejuruan & PKL:
+    {state['teks_kompetensi']}
+
+    Tugas Anda:
+    1. Analisis seluruh nilai mata pelajaran.
+    2. Khusus mata pelajaran produktif dan PKL, kaitkan capaian nilai dengan standar kompetensi.
+    3. Jika nilai >= 80, uraikan kompetensi yang dikuasai. Jika kurang, sebutkan yang perlu ditingkatkan.
+    4. Berikan laporan ringkas dalam format Markdown."""
+    
+    response = llm.invoke(prompt)
+    return {"hasil_agent_1": response.content}
+
+
+def agent_hrd_matcher(state: CareerCoachState) -> dict:
+    llm = get_llm()
+    prompt = f"""Anda adalah HRD Profesional untuk posisi '{state['pekerjaan_impian']}' dan jurusan '{state['jurusan']}'.
+    Profil Kompetensi Siswa:
+    {state['hasil_agent_1']}
+
+    Tugas Anda:
+    1. Jabarkan DAFTAR EKSPEKTASI UMUM INDUSTRI untuk posisi {state['pekerjaan_impian']}.
+    2. Berikan perkiraan PERSENTASE KECOCOKAN (Match Rate dalam %).
+    3. Rincikan daftar GAP SKILL siswa secara detail.
+    4. Berikan DISCLAIMER bahwa standar rekrutmen dapat bervariasi di tiap perusahaan."""
+    
+    response = llm.invoke(prompt)
+    return {"hasil_agent_2": response.content}
+
+
+def agent_mentor_belajar(state: CareerCoachState) -> dict:
+    llm = get_llm()
+    prompt = f"""Anda adalah Mentor Profesional / Desainer Pembelajaran Digital.
+    Jurusan: '{state['jurusan']}', Posisi Target: '{state['pekerjaan_impian']}'
+    Daftar GAP SKILL Siswa:
+    {state['hasil_agent_2']}
+
+    Tugas Anda:
+    Susun rekomendasi topik pembelajaran spesifik dan sertakan kata kunci (keyword) pencarian video tutorial YouTube atau kursus online untuk menambal kekurangan tersebut."""
+    
+    response = llm.invoke(prompt)
+    return {"hasil_agent_3": response.content}
+
+
+def agent_guru_bk(state: CareerCoachState) -> dict:
+    llm = get_llm()
+    prompt = f"""Anda adalah Guru Bimbingan Konseling (BK) di SMKN 1 Kasreman.
+    Rangkum hasil evaluasi berikut menjadi Laporan Konseling Karier Akhir untuk {state['nama_siswa']} ({state['jurusan']}) target '{state['pekerjaan_impian']}':
+
+    - Nilai Rapor: {state['teks_nilai']}
+    - Evaluasi Guru Produktif: {state['hasil_agent_1']}
+    - Analisis HRD & Gap Skill: {state['hasil_agent_2']}
+    - Rekomendasi Belajar: {state['hasil_agent_3']}
+
+    Struktur Laporan:
+    1. PENGANTAR
+    2. POTRET KOMPETENSI SISWA (sertakan ringkasan nilai dan capaian unit kompetensi)
+    3. ANALISIS KESIAPAN DUNIA KERJA (Match Rate, Gap Skill, & Catatan industri)
+    4. RENCANA AKSI MANDIRI
+    5. KATA-KATA MOTIVASI PENUTUP"""
+    
+    response = llm.invoke(prompt)
+    return {"laporan_final": response.content}
+
+
+# ==========================================
+# 3. PENYUSUNAN GRAPH WORKFLOW
+# ==========================================
+def build_career_graph():
+    workflow = StateGraph(CareerCoachState)
+
+    # Daftarkan Nodes
+    workflow.add_node("analis_rapor", agent_analis_rapor)
+    workflow.add_node("hrd_matcher", agent_hrd_matcher)
+    workflow.add_node("mentor_belajar", agent_mentor_belajar)
+    workflow.add_node("guru_bk", agent_guru_bk)
+
+    # Rangkai Edges (Alur Kerja Sekuensial)
+    workflow.add_edge(START, "analis_rapor")
+    workflow.add_edge("analis_rapor", "hrd_matcher")
+    workflow.add_edge("hrd_matcher", "mentor_belajar")
+    workflow.add_edge("mentor_belajar", "guru_bk")
+    workflow.add_edge("guru_bk", END)
+
+    return workflow.compile()
+
+
+# ==========================================
+# 4. STREAMLIT UI & EKSEKUSI GRAPH
+# ==========================================
 st.set_page_config(page_title="Smart Career Path SMKN 1 Kasreman", page_icon="🎓", layout="centered")
 
-st.title("🎓 Smart Career Path")
+st.title("🎓 Smart Career Path (LangGraph Edition)")
 st.subheader("Asisten Konseling Karier Virtual SMKN 1 Kasreman")
-st.write("Sistem AI Multi-Agent untuk analisis kompetensi nilai kejuruan dan kesiapan kerja siswa.")
 st.markdown("---")
 
-# 2. PENGATURAN API KEY GROQ
 if "GROQ_API_KEY" in os.environ:
-    st.sidebar.success("🔑 Groq API Key terdeteksi dengan aman di Sistem.")
+    st.sidebar.success("🔑 Groq API Key terdeteksi.")
 else:
-    api_key_input = st.sidebar.text_input("Masukkan Groq API Key Anda:", type="password")
+    api_key_input = st.sidebar.text_input("Masukkan Groq API Key:", type="password")
     if api_key_input:
         os.environ["GROQ_API_KEY"] = api_key_input
 
-# 3. FORM INPUT DATA SISWA INTERAKTIF
 st.header("📋 Input Data Siswa")
 nama_siswa = st.text_input("Nama Lengkap Siswa:", placeholder="Contoh: Muhammad Reyhan")
+jurusan_pilihan = st.selectbox("Pilih Jurusan:", options=list(MAPEL_PER_JURUSAN.keys()))
+pekerjaan_impian = st.text_input("Pekerjaan Impian:", placeholder="Contoh: Junior Backend Developer")
 
-# Dropdown Pilihan Jurusan
-jurusan_pilihan = st.selectbox(
-    "Pilih Jurusan / Program Keahlian:",
-    options=list(MAPEL_PER_JURUSAN.keys()),
-    help="Form nilai mata pelajaran akan menyesuaikan dengan jurusan yang dipilih."
-)
-
-pekerjaan_impian = st.text_input(
-    "Pekerjaan Impian / Target Karier:", 
-    placeholder="Contoh: Junior Backend Developer (TKJ) atau Junior Accountant / Tax Officer (AKL)"
-)
-
-st.markdown("---")
-st.subheader(f"📚 Transkrip Nilai - Jurusan {jurusan_pilihan}")
-st.write("Masukkan nilai mata pelajaran sesuai rapor (Format angka desimal, contoh: 80.45):")
-
-# Ambil daftar mapel dinamis sesuai jurusan yang dipilih
 current_mapel_list = MAPEL_PER_JURUSAN[jurusan_pilihan]
-
-# Tampilkan Widget Input Nilai dalam 2 Kolom Rapi
 col1, col2 = st.columns(2)
 dict_nilai_input = {}
 
@@ -57,124 +161,45 @@ for idx, (label_formal, key) in enumerate(current_mapel_list):
             value=80.0,
             step=0.1,
             format="%.2f",
-            key=f"{jurusan_pilihan}_{key}"  # Key unik per jurusan
+            key=f"{jurusan_pilihan}_{key}"
         )
         dict_nilai_input[label_formal] = val
 
-st.markdown("---")
-
-# 4. EKSEKUSI MULTI-AGENT PIPELINE
 if st.button("🚀 Mulai Analisis Karier Saya", type="primary"):
-    
     if not os.environ.get("GROQ_API_KEY"):
-        st.error("Maaf, API Key Groq belum diatur. Silakan masukkan di sidebar atau Advanced Settings.")
+        st.error("API Key Groq belum diatur.")
     elif not nama_siswa or not pekerjaan_impian:
-        st.warning("Mohon isi Nama Lengkap Siswa dan Pekerjaan Impian terlebih dahulu.")
+        st.warning("Mohon isi Nama Lengkap Siswa dan Pekerjaan Impian.")
     else:
-        with st.spinner("Tim AI sedang berdiskusi menganalisis kompetensimu... Mohon tunggu..."):
+        with st.spinner("Graph Multi-Agent sedang mengeksekusi pipeline..."):
             try:
-                client = Groq(
-                    api_key=os.environ.get("GROQ_API_KEY"),
-                )
-                
-                MODEL_NAME = "llama-3.3-70b-versatile" 
-
-                # Merangkai nilai mata pelajaran yang diinputkan
-                teks_nilai_mapel = ""
-                for label_formal, nilai_val in dict_nilai_input.items():
-                    teks_nilai_mapel += f"- {label_formal}: {nilai_val:.2f}\n"
-
-                # Ambil modul kompetensi yang sesuai dengan jurusan pilihan siswa
+                # Siapkan Data Input
+                teks_nilai = "\n".join([f"- {k}: {v:.2f}" for k, v in dict_nilai_input.items()])
                 kompetensi_jurusan = KOMPETENSI_PER_JURUSAN[jurusan_pilihan]
-                
                 teks_kompetensi = ""
-                for mata_pelajaran, daftar_poin in kompetensi_jurusan.items():
-                    teks_kompetensi += f"\n📌 {mata_pelajaran}:\n"
-                    for poin in daftar_poin:
-                        teks_kompetensi += f"  * {poin}\n"
+                for mapel_name, daftar_poin in kompetensi_jurusan.items():
+                    teks_kompetensi += f"\n📌 {mapel_name}:\n" + "\n".join([f"  * {p}" for p in daftar_poin])
 
-                data_siswa_smk = f"""
-                Nama Siswa: {nama_siswa}
-                Jurusan / Program Keahlian: {jurusan_pilihan}
-                
-                Transkrip Nilai Mata Pelajaran:
-                {teks_nilai_mapel}
+                initial_state = {
+                    "nama_siswa": nama_siswa,
+                    "jurusan": jurusan_pilihan,
+                    "pekerjaan_impian": pekerjaan_impian,
+                    "teks_nilai": teks_nilai,
+                    "teks_kompetensi": teks_kompetensi,
+                    "hasil_agent_1": "",
+                    "hasil_agent_2": "",
+                    "hasil_agent_3": "",
+                    "laporan_final": ""
+                }
 
-                Cakupan Standar Kompetensi Pembelajaran Kejuruan & Praktik Lapangan ({jurusan_pilihan}):
-                {teks_kompetensi}
-                """
+                # Inisialisasi dan Jalankan Graph
+                app = build_career_graph()
+                final_output = app.invoke(initial_state)
 
-                # ---- AGENT 1: Analis Rapor ----
-                prompt_agent_1 = f"""Anda adalah Guru Produktif Senior SMK untuk Jurusan {jurusan_pilihan}. Analisis data transkrip nilai siswa ini:
-                {data_siswa_smk}
-
-                Tugas Anda:
-                1. Analisis seluruh nilai mata pelajaran.
-                2. Khusus mata pelajaran kejuruan produktif dan Praktik Kerja Lapangan (PKL), kaitkan capaian nilainya dengan cakupan standar kompetensi yang disediakan untuk jurusan {jurusan_pilihan}.
-                3. Jika nilainya tinggi (misal >= 80), uraikan poin-poin kompetensi yang telah dikuasai dengan baik. Jika kurang, sebutkan poin kompetensi yang masih perlu ditingkatkan.
-                4. Berikan laporan ringkas dan terstruktur dalam format Markdown."""
-
-                chat_completion_1 = client.chat.completions.create(
-                    messages=[{"role": "user", "content": prompt_agent_1}],
-                    model=MODEL_NAME,
-                )
-                hasil_agent_1 = chat_completion_1.choices[0].message.content
-
-                # ---- AGENT 2: HRD Matcher ----
-                prompt_agent_2 = f"""Anda adalah HRD Profesional di industri yang relevan dengan posisi '{pekerjaan_impian}' dan latar belakang jurusan '{jurusan_pilihan}'. Baca profil kompetensi siswa ini:
-                {hasil_agent_1}
-
-                Tugas Anda untuk posisi pekerjaan impian '{pekerjaan_impian}':
-                1. Jabarkan DAFTAR EKSPEKTASI UMUM INDUSTRI (persyaratan teknis/soft skills yang umum dicari pasar industri untuk posisi tersebut).
-                2. Berikan perkiraan PERSENTASE KECOCOKAN (Match Rate dalam %) antara profil siswa dengan ekspektasi industri.
-                3. Rincikan daftar GAP SKILL (kekurangan/kekosongan kompetensi siswa) secara detail.
-                4. Berikan KETERANGAN / DISCLAIMER penting bahwa data ekspektasi ini bersifat umum (general), karena setiap perusahaan atau proses rekrutmen dapat memberikan kriteria dan kualifikasi yang berbeda-beda.
-                
-                Sajikan dalam format Markdown yang rapi."""
-                
-                chat_completion_2 = client.chat.completions.create(
-                    messages=[{"role": "user", "content": prompt_agent_2}],
-                    model=MODEL_NAME,
-                )
-                hasil_agent_2 = chat_completion_2.choices[0].message.content
-
-                # ---- AGENT 3: Mentor Belajar ----
-                prompt_agent_3 = f"Anda adalah seorang Mentor Profesional / Instruksional Desainer Pembelajaran Digital. Berikut adalah daftar GAP SKILL siswa jurusan '{jurusan_pilihan}' untuk posisi '{pekerjaan_impian}':\n{hasil_agent_2}\nTugas Anda adalah menyusun rekomendasi topik pembelajaran spesifik dan menyarankan kata kunci (keyword) pencarian video tutorial YouTube atau kursus online yang tepat untuk menambal masing-masing kekurangan tersebut."
-                chat_completion_3 = client.chat.completions.create(
-                    messages=[{"role": "user", "content": prompt_agent_3}],
-                    model=MODEL_NAME,
-                )
-                hasil_agent_3 = chat_completion_3.choices[0].message.content
-
-                # ---- AGENT 4: Guru BK Virtual ----
-                prompt_agent_4 = f"""Anda adalah seorang Guru Bimbingan Konseling (BK) yang sangat suportif di SMKN 1 Kasreman. Merangkum seluruh hasil analisis berikut menjadi satu Laporan Konseling Karier Akhir untuk siswa bernama {nama_siswa} (Jurusan {jurusan_pilihan}) yang mengincar posisi '{pekerjaan_impian}'.
-                
-                Data Rapor Siswa:
-                {teks_nilai_mapel}
-                
-                Data Analisis Tim:
-                - Agent 1 (Rapor & Standar Kompetensi): {hasil_agent_1}
-                - Agent 2 (Kesiapan Kerja & Ekspektasi Industri): {hasil_agent_2}
-                - Agent 3 (Rencana Belajar): {hasil_agent_3}
-                
-                Susun laporan dengan struktur:
-                1. PENGANTAR
-                2. POTRET KOMPETENSI ANDA (Wajib sertakan kembali tabel/daftar 16 nilai mata pelajaran input di atas secara rapi, lalu berikan rangkuman singkat kelebihan & kekurangan rapor berdasarkan pencapaian unit kompetensi kejuruan dan PKL jurusan {jurusan_pilihan}).
-                3. ANALISIS KESIAPAN DUNIA KERJA (Jabarkan Ekspektasi Umum Pasar Industri untuk posisi '{pekerjaan_impian}', Match Rate, Gap Skill, serta cantumkan Keterangan/Catatan bahwa standar rekrutmen bersifat general dan dapat bervariasi di tiap perusahaan).
-                4. RENCANA AKSI MANDIRI
-                5. KATA-KATA MOTIVASI PENUTUP."""
-                
-                chat_completion_4 = client.chat.completions.create(
-                    messages=[{"role": "user", "content": prompt_agent_4}],
-                    model=MODEL_NAME,
-                )
-                hasil_akhir_bk = chat_completion_4.choices[0].message.content
-
-                # Tampilkan hasil akhir ke layar web Streamlit
                 st.success("Analisis Selesai!")
                 st.markdown("---")
                 st.header("📊 Hasil Analisis Konseling Karier")
-                st.markdown(hasil_akhir_bk)
+                st.markdown(final_output["laporan_final"])
 
             except Exception as e:
-                st.error(f"Terjadi kesalahan saat memproses data: {str(e)}")
+                st.error(f"Terjadi kesalahan: {str(e)}")
